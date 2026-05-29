@@ -41,7 +41,7 @@
 
   <div class="container">
     <header>
-      <div class="globe">🌐</div>
+      <div class="globe">🌎</div>
       <h1>ระบบแปลภาษา</h1>
       <p class="subtitle">PDF · TXT · ข้อความ · เสียง</p>
     </header>
@@ -52,7 +52,7 @@
       <!-- ── Main Mode Tabs ───────────────────────────── -->
       <div class="tab-row" id="modeTabRow">
         <button class="tab-btn active" id="modeTabTranslate" onclick="switchMainMode('translate')">🌐 แปลภาษา</button>
-        <button class="tab-btn" id="modeTabSpeech" onclick="switchMainMode('speech')">🎙️ ถอดเสียง</button>
+        <button class="tab-btn" id="modeTabSpeech" onclick="switchMainMode('speech')">📂 ถอดเสียง</button>
       </div>
 
       <!-- ══════════════════════════════════════════════ -->
@@ -176,10 +176,10 @@
             <select id="speechLang">
               <option value="auto" selected>🔍 ตรวจจับอัตโนมัติ</option>
               <option value="th-TH">🇹🇭 ภาษาไทย</option>
-              <option value="en-US">🇺🇸 English (United States)</option>
-              <option value="ja-JP">🇯🇵 日本語 (Japan)</option>
-              <option value="ko-KR">🇰🇷 한국어 (South Korea)</option>
-              <option value="zh-CN">🇨🇳 中文 (China)</option>
+              <option value="en-US">🇺🇸 English </option>
+              <option value="ja-JP">🇯🇵 Japan</option>
+              <option value="ko-KR">🇰🇷 South Korea</option>
+              <option value="zh-CN">🇨🇳 China</option>
             </select>
           </div>
           <div class="arrow">→</div>
@@ -216,7 +216,7 @@
 
           <button id="processAudioBtn" onclick="processAudioFile()" style="margin-top:14px;" disabled>
             <span class="btn-text">เริ่มถอดความจากไฟล์คลิป</span>
-            <span class="btn-icon">⚡</span>
+
           </button>
         </div>
 
@@ -229,6 +229,25 @@
           <p id="speechOutputText" style="color:var(--text-placeholder); white-space:pre-wrap;">
             ข้อความที่ได้จากเสียงจะแสดงที่นี่...
           </p>
+        </div>
+
+        <button id="summarizeBtn" onclick="summarizeTranscript()" style="
+          width:100%; padding:14px 20px; font-size:1rem; font-weight:600;
+          border-radius:14px; display:flex; align-items:center; justify-content:center;
+          gap:10px; cursor:pointer; border:2px solid var(--accent); color:var(--accent);
+          background:transparent; transition:all 0.2s ease-in-out;
+          font-family:'Outfit','Sarabun',sans-serif;
+        " onmouseover="this.style.background='var(--accent)';this.style.color='#fff';"
+           onmouseout="this.style.background='transparent';this.style.color='var(--accent)';">
+          <span>สรุปข้อความด้วย AI</span>
+        </button>
+
+        <div class="result" id="summaryResultBox" style="display:none;">
+          <div class="result-header">
+            <span>📝 สรุปข้อความ</span>
+            <button class="copy-btn" onclick="copySummaryResult()" title="คัดลอก">📋</button>
+          </div>
+          <p id="summaryOutputText" style="color:var(--text-placeholder); white-space:pre-wrap;">ผลสรุปจะแสดงที่นี่...</p>
         </div>
 
       </div><!-- /speechPanel -->

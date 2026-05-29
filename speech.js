@@ -1,6 +1,7 @@
 let currentSpeechMode = 'live';
 let recognition = null;
 let isRecording = false;
+let liveTranslatedBuffer = "";
 let uploadedAudioFile = null;
 let whisperTranscriber = null; // ตัวเก็บโมเดล AI
 
@@ -42,10 +43,19 @@ if ('webkitSpeechRecognition' in window || 'speechRecognition' in window) {
       }
     }
 
-    const outputEl = document.getElementById("speechOutputText");
-    if (finalTranscript || interimTranscript) {
-      outputEl.style.color = "var(--text)";
-      outputEl.textContent = finalTranscript + interimTranscript;
+    const outputEl = document.getElementById("liveOutputText");
+    if (!finalTranscript && !interimTranscript) return;
+
+    // interim: แสดงจุดบอกว่ากำลังฟัง ไม่แสดงข้อความดิบ
+    if (interimTranscript && !finalTranscript) {
+      outputEl.style.color = "var(--text-placeholder)";
+      outputEl.textContent = "🎤 กำลังฟัง...";
+      return;
+    }
+
+    // final: ส่งแปลทันที
+    if (finalTranscript) {
+      translateLiveText(finalTranscript.trim(), outputEl);
     }
   };
 
@@ -86,15 +96,61 @@ if ('webkitSpeechRecognition' in window || 'speechRecognition' in window) {
   });
 }
 
+// ─── Live translate helper ────────────────────────────────────────────────────
+async function translateLiveText(text, outputEl) {
+  const flagMap = { th:"🇹🇭", en:"🇺🇸", ja:"🇯🇵", ko:"🇰🇷", "zh-CN":"🇨🇳", fr:"🇫🇷", de:"🇩🇪", es:"🇪🇸", ar:"🇸🇦" };
+
+  try {
+    // อ่านภาษาเป้าหมายที่ user เลือกไว้
+    const targetLangEl = document.getElementById("targetSpeechLang");
+    const targetLang = targetLangEl ? targetLangEl.value : "th";
+
+    // detect ภาษาต้นทาง + แปลในครั้งเดียว
+    const transUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+    const res = await fetch(transUrl);
+    const data = await res.json();
+    const detectedLang = data[2]; // "th", "en", etc.
+
+    let translated = data[0]?.filter(s => Array.isArray(s) && s[0]).map(s => s[0]).join("") || text;
+
+    // ถ้าภาษาต้นทาง = ภาษาเป้าหมาย → วนผ่าน en เป็นตัวกลาง
+    const normalize = (s) => s?.replace(/\s+/g, " ").trim().toLowerCase();
+    const isSame = detectedLang === targetLang || normalize(translated) === normalize(text);
+    if (isSame) {
+      const pivot = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=${detectedLang}&tl=en&dt=t&q=${encodeURIComponent(text)}`);
+      const pivotData = await pivot.json();
+      const pivotText = pivotData[0]?.filter(s => Array.isArray(s) && s[0]).map(s => s[0]).join("") || text;
+      const finalRes = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${targetLang}&dt=t&q=${encodeURIComponent(pivotText)}`);
+      const finalData = await finalRes.json();
+      translated = finalData[0]?.filter(s => Array.isArray(s) && s[0]).map(s => s[0]).join("") || pivotText;
+    }
+
+    outputEl.style.color = "var(--text)";
+    outputEl.textContent = translated;
+  } catch {
+    outputEl.style.color = "var(--text)";
+    outputEl.textContent = text;
+  }
+}
+
+function copyLiveResult() {
+  const text = document.getElementById("liveOutputText")?.textContent;
+  if (!text || text === "ข้อความที่ได้จากเสียงจะแสดงที่นี่..." || text.startsWith("⚠️") || text.startsWith("🎤")) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector("#liveResultBox .copy-btn");
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
+  });
+}
+
 // ─── 2. ระบบจัดการแท็บหน้าจอ ───────────────────────────────────────────────
 function switchSpeechMode(mode) {
   currentSpeechMode = mode;
   document.getElementById("tabLive").classList.toggle("active", mode === 'live');
   document.getElementById("tabAudioFile").classList.toggle("active", mode === 'file');
-  
+
   document.getElementById("livePanel").style.display = mode === 'live' ? 'block' : 'none';
   document.getElementById("audioFilePanel").style.display = mode === 'file' ? 'block' : 'none';
-  
+
   if (isRecording) { stopRecordingStyle(); }
   clearOutputArea();
 }
@@ -109,17 +165,17 @@ function toggleBtnRecord() {
   const text = document.getElementById("recordText");
   const icon = document.getElementById("recordIcon");
   const status = document.getElementById("recordStatus");
-  const outputEl = document.getElementById("speechOutputText");
+  const outputEl = document.getElementById("liveOutputText");
 
   if (!isRecording) {
     isRecording = true;
     
-    // ตั้งค่าภาษา (หากระบุตรวจจับอัตโนมัติ ให้ใช้ภาษาเริ่มต้นของอุปกรณ์หรือ th-TH ในการบันทึก)
-    let lang = document.getElementById("speechLang").value;
-    if (lang === "auto") lang = "th-TH";
-    recognition.lang = lang;
+    // ไม่ fix ภาษา เพื่อให้รับทั้งไทยและอังกฤษได้
+    const selectedLang = document.getElementById("speechLang").value;
+    recognition.lang = selectedLang === "auto" ? "" : selectedLang;
 
     try {
+      liveTranslatedBuffer = "";
       recognition.start();
       btn.style.background = "var(--error)";
       text.textContent = "กำลังบันทึกเสียง... (กดเพื่อหยุด)";
@@ -127,7 +183,7 @@ function toggleBtnRecord() {
       status.textContent = "📢 ระบบกำลังฟังเสียงสดของคุณ พูดใส่ไมโครโฟนได้เลย...";
       outputEl.textContent = "กำลังรอฟังเสียงพูดสด...";
       outputEl.style.color = "var(--text-placeholder)";
-      document.getElementById("speechResultBox").classList.add("loading");
+      document.getElementById("liveResultBox").classList.add("loading");
     } catch(e) { isRecording = false; }
   } else {
     stopRecordingStyle();
@@ -142,7 +198,7 @@ function stopRecordingStyle() {
   if (document.getElementById("recordText")) document.getElementById("recordText").textContent = "เริ่มบันทึกเสียง";
   if (document.getElementById("recordIcon")) document.getElementById("recordIcon").textContent = "🔴";
   if (document.getElementById("recordStatus")) document.getElementById("recordStatus").textContent = "กดปุ่มด้านบนแล้วเริ่มพูดได้ทันที ระบบจะพิมพ์ตามคำพูดของคุณ";
-  document.getElementById("speechResultBox").classList.remove("loading");
+  document.getElementById("liveResultBox").classList.remove("loading");
 }
 
 // ─── 4. ระบบถอดความเสียงและแปลเป็นภาษาไทยจากไฟล์คลิปวิดีโอ ───────────────────────
@@ -363,27 +419,53 @@ async function processAudioFile() {
 
 // ─── 5. Helpers ────────────────────────────────────────────────────────────────
 function clearOutputArea() {
+  // reset live panel
+  const liveEl = document.getElementById("liveOutputText");
+  if (liveEl) { liveEl.textContent = "ข้อความที่ได้จากเสียงจะแสดงที่นี่..."; liveEl.style.color = "var(--text-placeholder)"; }
+  const liveBox = document.getElementById("liveResultBox");
+  if (liveBox) liveBox.classList.remove("loading");
+
+  // reset file panel
   const outputEl = document.getElementById("speechOutputText");
-  outputEl.textContent = "ข้อความที่ได้จากเสียงจะแสดงที่นี่...";
-  outputEl.style.color = "var(--text-placeholder)";
-  document.getElementById("speechResultBox").classList.remove("loading");
+  if (outputEl) { outputEl.textContent = "ข้อความที่ได้จากเสียงจะแสดงที่นี่..."; outputEl.style.color = "var(--text-placeholder)"; }
+  const speechBox = document.getElementById("speechResultBox");
+  if (speechBox) speechBox.classList.remove("loading");
+
+  liveTranslatedBuffer = "";
+  // ซ่อน summary box
+  const summaryBox = document.getElementById("summaryResultBox");
+  if (summaryBox) {
+    summaryBox.style.display = "none";
+    summaryBox.classList.remove("loading");
+    const summaryEl = document.getElementById("summaryOutputText");
+    if (summaryEl) { summaryEl.textContent = "ผลสรุปจะแสดงที่นี่..."; summaryEl.style.color = "var(--text-placeholder)"; }
+  }
 }
 
 function copySpeechResult() {
-  const text = document.getElementById("speechOutputText").textContent;
+  const text = document.getElementById("speechOutputText")?.textContent?.trim();
   if (!text || text === "ข้อความที่ได้จากเสียงจะแสดงที่นี่..." || text.startsWith("⚠️") || text.startsWith("กำลัง")) return;
+  const btn = document.querySelector("#speechResultBox .copy-btn");
   navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector(".copy-btn");
-    btn.textContent = "✅";
-    setTimeout(() => (btn.textContent = "📋"), 1500);
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
+  }).catch(() => {
+    // fallback สำหรับ browser ที่ไม่รองรับ clipboard API
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
   });
 }
 
 function showSpeechError(msg) {
-  const outputEl = document.getElementById("speechOutputText");
-  outputEl.textContent = "⚠️ " + msg;
-  outputEl.style.color = "var(--error)";
-  document.getElementById("speechResultBox").classList.remove("loading");
+  const outputEl = document.getElementById("liveOutputText");
+  if (outputEl) { outputEl.textContent = "⚠️ " + msg; outputEl.style.color = "var(--error)"; }
+  const liveBox = document.getElementById("liveResultBox");
+  if (liveBox) liveBox.classList.remove("loading");
 }
 
 function splitText(text, maxLen) {
@@ -452,6 +534,81 @@ async function translateToThai(text, sourceLang = "en") {
   return translateTo(text, sourceLang, "th");
 }
 
+// ─── 6. ระบบสรุปข้อความแบบ Extractive (ไม่ใช้ API) ───────────────────────────
+
+function extractiveSummarize(text, maxSentences) {
+  const raw = text.replace(/([.?!\n])\s*/g, "$1\n").split("\n").map(s => s.trim()).filter(s => s.length > 10);
+  if (raw.length === 0) return text;
+  if (raw.length <= maxSentences) return raw.join("\n");
+
+  const stopwords = new Set(["และ","ที่","ใน","ของ","ว่า","ให้","แล้ว","ก็","จะ","ได้","มี","เป็น","กับ","ไม่","แต่","หรือ","the","a","an","is","are","was","were","to","of","and","in","that","it","for","on","with","as","at","by","this","be","from","or","but","not","have","had","has","i","you","he","she","they","we","do","did","will","would","can","could","should","about","so","if","up","out","also","just","into","more","than","then","its","your","our","their","been","which","what","when","there","said","all","one","two","some","other","new","how","time","no","may","these","people","like","use"]);
+
+  const wordFreq = {};
+  raw.forEach(s => {
+    s.toLowerCase().split(/[\s,.!?():;]+/).filter(w => w.length > 1 && !stopwords.has(w)).forEach(w => {
+      wordFreq[w] = (wordFreq[w] || 0) + 1;
+    });
+  });
+
+  const scores = raw.map((s, idx) => {
+    const words = s.toLowerCase().split(/[\s,.!?():;]+/).filter(w => w.length > 1 && !stopwords.has(w));
+    const tfScore = words.reduce((sum, w) => sum + (wordFreq[w] || 0), 0) / (words.length || 1);
+    const posBonus = (idx === 0 || idx === raw.length - 1) ? 2 : (idx < Math.ceil(raw.length * 0.2)) ? 1.3 : 1;
+    const lenBonus = Math.min(s.length / 80, 1.5);
+    return { idx, score: tfScore * posBonus * lenBonus };
+  });
+
+  const top = scores.sort((a, b) => b.score - a.score).slice(0, maxSentences).sort((a, b) => a.idx - b.idx);
+  return top.map(t => raw[t.idx]).join("\n");
+}
+
+async function summarizeTranscript() {
+  const outputEl = document.getElementById("speechOutputText");
+  const text = outputEl?.textContent?.trim();
+
+  const placeholder = "ข้อความที่ได้จากเสียงจะแสดงที่นี่...";
+  const isInvalid = !text || text === placeholder || text.startsWith("⚠️") || text.startsWith("กำลัง");
+
+  if (isInvalid) {
+    alert("กรุณาถอดความเสียงให้เสร็จก่อน แล้วค่อยกดสรุป");
+    return;
+  }
+
+  const summaryBox = document.getElementById("summaryResultBox");
+  const summaryEl = document.getElementById("summaryOutputText");
+  const btn = document.getElementById("summarizeBtn");
+
+  summaryBox.style.display = "block";
+  summaryEl.style.color = "var(--text-placeholder)";
+  summaryEl.textContent = "✨ กำลังสรุปข้อความ...";
+  summaryBox.classList.add("loading");
+  btn.disabled = true;
+
+  try {
+    const wordCount = text.split(/\s+/).length;
+    const maxSent = wordCount < 100 ? 3 : wordCount < 300 ? 4 : wordCount < 600 ? 5 : 7;
+    const summary = extractiveSummarize(text, maxSent);
+
+    summaryEl.style.color = "var(--text)";
+    summaryEl.textContent = summary || "ไม่สามารถสรุปข้อความได้";
+  } catch (err) {
+    summaryEl.style.color = "var(--error)";
+    summaryEl.textContent = "⚠️ สรุปไม่สำเร็จ: " + err.message;
+  } finally {
+    summaryBox.classList.remove("loading");
+    btn.disabled = false;
+  }
+}
+
+function copySummaryResult() {
+  const text = document.getElementById("summaryOutputText").textContent;
+  if (!text || text.startsWith("⚠️") || text.startsWith("✨") || text === "ผลสรุปจะแสดงที่นี่...") return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btns = document.querySelectorAll("#summaryResultBox .copy-btn");
+    btns.forEach(btn => { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); });
+  });
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const audioZone = document.getElementById("audioUploadZone");
   if (audioZone) {
@@ -465,3 +622,11 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+function copyLiveResult() {
+  const text = document.getElementById("liveOutputText").textContent;
+  if (!text || text === "ข้อความที่ได้จากเสียงจะแสดงที่นี่..." || text.startsWith("⚠️") || text.startsWith("กำลัง")) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector("#liveResultBox .copy-btn");
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
+  });
+}

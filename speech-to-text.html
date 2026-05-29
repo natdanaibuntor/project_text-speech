@@ -69,11 +69,11 @@
           <label id="speechLangLabel">ภาษาของเสียงพูด</label>
           <select id="speechLang">
             <option value="auto" selected>🔍 ตรวจจับอัตโนมัติ</option>
-            <option value="th-TH">🇹🇭 ภาษาไทย (Thailand)</option>
-            <option value="en-US">🇺🇸 English (United States)</option>
-            <option value="ja-JP">🇯🇵 日本語 (Japan)</option>
-            <option value="ko-KR">🇰🇷 한국어 (South Korea)</option>
-            <option value="zh-CN">🇨🇳 中文 (China)</option>
+            <option value="th-TH">🇹🇭 ภาษาไทย</option>
+            <option value="en-US">🇺🇸 English</option>
+            <option value="ja-JP">🇯🇵 Japan</option>
+            <option value="ko-KR">🇰🇷 South Korea</option>
+            <option value="zh-CN">🇨🇳 China</option>
           </select>
         </div>
         <div class="arrow">→</div>
@@ -104,6 +104,14 @@
           <span id="recordText">เริ่มบันทึกเสียง</span>
         </button>
         <p id="recordStatus">กดปุ่มด้านบนแล้วเริ่มพูดได้ทันที ระบบจะพิมพ์ตามคำพูดของคุณ</p>
+
+        <div class="result" id="liveResultBox" style="margin-top: 15px;">
+          <div class="result-header">
+            <span>ข้อความที่ถอดความได้</span>
+            <button class="copy-btn" onclick="copyLiveResult()" title="คัดลอก">📋</button>
+          </div>
+          <p id="liveOutputText" style="color: var(--text-placeholder); white-space: pre-wrap;">ข้อความที่ได้จากเสียงจะแสดงที่นี่...</p>
+        </div>
       </div>
 
       <div id="audioFilePanel" style="display: none;">
@@ -122,17 +130,37 @@
 
         <button id="processAudioBtn" onclick="processAudioFile()" style="margin-top: 15px;" disabled>
           <span class="btn-text">เริ่มถอดความจากไฟล์คลิป</span>
-          <span class="btn-icon">⚡</span>
         </button>
+
+        <div class="result" id="speechResultBox" style="margin-top: 15px;">
+          <div class="result-header">
+            <span>ข้อความที่ถอดความได้</span>
+            <button class="copy-btn" onclick="copySpeechResult()" title="คัดลอก">📋</button>
+          </div>
+          <p id="speechOutputText" style="color: var(--text-placeholder); white-space: pre-wrap;">ข้อความที่ได้จากเสียงจะแสดงที่นี่...</p>
+        </div>
+
+        <button id="summarizeBtn" onclick="summarizeTranscript()" style="
+          width: 100%; padding: 14px 20px; font-size: 1rem; font-weight: 600;
+          border-radius: 14px; display: flex; align-items: center; justify-content: center;
+          gap: 10px; cursor: pointer; border: 2px solid var(--accent); color: var(--accent);
+          background: transparent; transition: all 0.2s ease-in-out; margin-top: 4px;
+        " onmouseover="this.style.background='var(--accent)';this.style.color='#fff';"
+           onmouseout="this.style.background='transparent';this.style.color='var(--accent)';">
+          <span>สรุปข้อความด้วย AI</span>
+        </button>
+
+        <div class="result" id="summaryResultBox" style="display: none;">
+          <div class="result-header">
+            <span>📝 สรุปข้อความ</span>
+            <button class="copy-btn" onclick="copySummaryResult()" title="คัดลอก">📋</button>
+          </div>
+          <p id="summaryOutputText" style="color: var(--text-placeholder); white-space: pre-wrap;">ผลสรุปจะแสดงที่นี่...</p>
+        </div>
       </div>
 
-      <div class="result" id="speechResultBox">
-        <div class="result-header">
-          <span>ข้อความที่ถอดความได้</span>
-          <button class="copy-btn" onclick="copySpeechResult()" title="คัดลอก">📋</button>
-        </div>
-        <p id="speechOutputText" style="color: var(--text-placeholder); white-space: pre-wrap;">ข้อความที่ได้จากเสียงจะแสดงที่นี่...</p>
-      </div>
+
+
     </div>
   </div>
 

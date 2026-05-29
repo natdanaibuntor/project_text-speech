@@ -276,12 +276,20 @@ function showError(msg) {
 }
 
 function copyResult() {
-  const text = document.getElementById("outputText").textContent;
-  if (!text || text === "ผลลัพธ์จะแสดงที่นี่...") return;
+  const text = document.getElementById("outputText")?.textContent?.trim();
+  if (!text || text === "ผลลัพธ์จะแสดงที่นี่..." || text.startsWith("⚠️")) return;
+  const btn = document.querySelector("#resultBox .copy-btn");
   navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector(".copy-btn");
-    btn.textContent = "✅";
-    setTimeout(() => (btn.textContent = "📋"), 1500);
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
+  }).catch(() => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (btn) { btn.textContent = "✅"; setTimeout(() => (btn.textContent = "📋"), 1500); }
   });
 }
 
@@ -449,4 +457,72 @@ async function downloadTranslationPdf() {
     btn.textContent = "⬇️ดาวโหลดไฟล์ PDF ";
     btn.disabled = false;
   }
+}
+// ─── Summary (Extractive, no API) ─────────────────────────────────────────────
+function extractiveSummarize(text, maxSentences) {
+  const raw = text.replace(/([.?!\n])\s*/g, "$1\n").split("\n").map(s => s.trim()).filter(s => s.length > 10);
+  if (raw.length === 0) return text;
+  if (raw.length <= maxSentences) return raw.join("\n");
+
+  const stopwords = new Set(["และ","ที่","ใน","ของ","ว่า","ให้","แล้ว","ก็","จะ","ได้","มี","เป็น","กับ","ไม่","แต่","หรือ","the","a","an","is","are","was","were","to","of","and","in","that","it","for","on","with","as","at","by","this","be","from","or","but","not","have","had","has","i","you","he","she","they","we","do","did","will","would","can","could","should","about","so","if","up","out","also","just","into","more","than","then","its","your","our","their","been","which","what","when","there","said","all","some","other","new","how","time","no","may","these","people","like","use"]);
+
+  const wordFreq = {};
+  raw.forEach(s => {
+    s.toLowerCase().split(/[\s,.!?():;]+/).filter(w => w.length > 1 && !stopwords.has(w)).forEach(w => {
+      wordFreq[w] = (wordFreq[w] || 0) + 1;
+    });
+  });
+
+  const scores = raw.map((s, idx) => {
+    const words = s.toLowerCase().split(/[\s,.!?():;]+/).filter(w => w.length > 1 && !stopwords.has(w));
+    const tfScore = words.reduce((sum, w) => sum + (wordFreq[w] || 0), 0) / (words.length || 1);
+    const posBonus = (idx === 0 || idx === raw.length - 1) ? 2 : (idx < Math.ceil(raw.length * 0.2)) ? 1.3 : 1;
+    const lenBonus = Math.min(s.length / 80, 1.5);
+    return { idx, score: tfScore * posBonus * lenBonus };
+  });
+
+  return scores.sort((a, b) => b.score - a.score).slice(0, maxSentences).sort((a, b) => a.idx - b.idx).map(t => raw[t.idx]).join("\n");
+}
+
+async function summarizeTranscript() {
+  const outputEl = document.getElementById("speechOutputText");
+  const text = outputEl?.textContent?.trim();
+  const placeholder = "ข้อความที่ได้จากเสียงจะแสดงที่นี่...";
+
+  if (!text || text === placeholder || text.startsWith("⚠️") || text.startsWith("กำลัง")) {
+    alert("กรุณาถอดความเสียงให้เสร็จก่อน แล้วค่อยกดสรุป");
+    return;
+  }
+
+  const summaryBox = document.getElementById("summaryResultBox");
+  const summaryEl  = document.getElementById("summaryOutputText");
+  const btn        = document.getElementById("summarizeBtn");
+
+  summaryBox.style.display = "block";
+  summaryEl.style.color = "var(--text-placeholder)";
+  summaryEl.textContent = "✨ กำลังสรุปข้อความ...";
+  summaryBox.classList.add("loading");
+  btn.disabled = true;
+
+  try {
+    const wordCount = text.split(/\s+/).length;
+    const maxSent   = wordCount < 100 ? 3 : wordCount < 300 ? 4 : wordCount < 600 ? 5 : 7;
+    summaryEl.style.color = "var(--text)";
+    summaryEl.textContent = extractiveSummarize(text, maxSent) || "ไม่สามารถสรุปข้อความได้";
+  } catch (err) {
+    summaryEl.style.color = "var(--error)";
+    summaryEl.textContent = "⚠️ สรุปไม่สำเร็จ: " + err.message;
+  } finally {
+    summaryBox.classList.remove("loading");
+    btn.disabled = false;
+  }
+}
+
+function copySummaryResult() {
+  const text = document.getElementById("summaryOutputText").textContent;
+  if (!text || text.startsWith("⚠️") || text.startsWith("✨") || text === "ผลสรุปจะแสดงที่นี่...") return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btns = document.querySelectorAll("#summaryResultBox .copy-btn");
+    btns.forEach(b => { b.textContent = "✅"; setTimeout(() => (b.textContent = "📋"), 1500); });
+  });
 }
