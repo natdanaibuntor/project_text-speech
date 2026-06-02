@@ -48,6 +48,22 @@
       text-align: center;
       color: var(--text-muted);
     }
+
+    /* ─── Summary items ─── */
+    #summaryOutputText {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 4px 0;
+    }
+    .summary-item {
+      padding: 6px 0;
+      line-height: 1.7;
+    }
+    .summary-text {
+      font-size: 0.95rem;
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
@@ -118,8 +134,8 @@
         <div class="pdf-upload-zone" id="audioUploadZone" onclick="document.getElementById('audioFileInput').click()">
           <div class="pdf-upload-icon">🎬</div>
           <div class="pdf-upload-text">คลิกหรือลากไฟล์วิดีโอ/ไฟล์เสียงมาวางที่นี่</div>
-          <div class="pdf-upload-sub">รองรับไฟล์คลิป .mp4, .mov, .avi, .mp3, .wav, .m4a</div>
-          <input type="file" id="audioFileInput" accept="audio/*,video/*" style="display:none" onchange="handleAudioUpload(event)">
+          <div class="pdf-upload-sub">รองรับไฟล์คลิป .mp4, .mov, .avi, .mp3, .wav, .m4a </div>
+          <input type="file" id="audioFileInput" accept=".wav,.mp3,.mp4,.mov,.avi,.m4a,.ogg,.flac,.webm,audio/*,video/*" style="display:none" onchange="handleAudioUpload(event)">
         </div>
 
         <div class="pdf-info" id="audioFileInfo" style="display:none; margin-top: 15px;">
@@ -155,7 +171,7 @@
             <span>📝 สรุปข้อความ</span>
             <button class="copy-btn" onclick="copySummaryResult()" title="คัดลอก">📋</button>
           </div>
-          <p id="summaryOutputText" style="color: var(--text-placeholder); white-space: pre-wrap;">ผลสรุปจะแสดงที่นี่...</p>
+          <div id="summaryOutputText" style="color: var(--text-placeholder);">ผลสรุปจะแสดงที่นี่...</div>
         </div>
       </div>
 

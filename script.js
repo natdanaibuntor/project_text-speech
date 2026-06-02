@@ -31,7 +31,8 @@ const googleLangCodes = {
 let pdfDoc = null;
 let totalPages = 0;
 let txtContent = "";
-let currentMode = "text"; // 'text' | 'pdf' | 'txt'
+let docxContent = "";
+let currentMode = "text"; // 'text' | 'pdf' | 'txt' | 'docx'
 
 // ─── Character count ───────────────────────────────────────────────────────────
 document.getElementById("inputText").addEventListener("input", function () {
@@ -62,8 +63,10 @@ function routeFile(file) {
     loadPdf(file);
   } else if (ext === "txt" || file.type === "text/plain") {
     loadTxt(file);
+  } else if (ext === "docx" || ext === "doc" || file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    loadDocx(file);
   } else {
-    showError("รองรับเฉพาะไฟล์ .pdf และ .txt เท่านั้น");
+    showError("รองรับเฉพาะไฟล์ .pdf, .txt และ .docx เท่านั้น");
   }
 }
 
@@ -91,8 +94,7 @@ async function loadPdf(file) {
 }
 
 // ─── Load TXT ──────────────────────────────────────────────────────────────────
-async function loadTxt(file) {
-  txtContent = await file.text();
+async function loadTxt(file) {  txtContent = await file.text();
 
   document.getElementById("fileIcon").textContent = "📝";
   document.getElementById("pdfFileName").textContent = file.name;
@@ -107,8 +109,32 @@ async function loadTxt(file) {
 
   document.getElementById("tabTxt").style.display = "inline-flex";
   document.getElementById("tabPdf").style.display = "none";
+  document.getElementById("tabDocx").style.display = "none";
   document.getElementById("tabRow").style.display = "flex";
   switchTab("txt");
+}
+
+// ─── Load DOCX ─────────────────────────────────────────────────────────────────
+async function loadDocx(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  docxContent = result.value;
+
+  document.getElementById("fileIcon").textContent = "📘";
+  document.getElementById("pdfFileName").textContent = file.name;
+  document.getElementById("pdfPageCount").textContent = `${docxContent.length.toLocaleString()} ตัวอักษร`;
+  document.getElementById("pdfInfo").style.display = "flex";
+
+  const preview = document.getElementById("docxPreview");
+  preview.textContent = docxContent.length > 500
+    ? docxContent.slice(0, 500) + "\n\n… (แสดงแค่ 500 ตัวอักษรแรก)"
+    : docxContent;
+
+  document.getElementById("tabDocx").style.display = "inline-flex";
+  document.getElementById("tabTxt").style.display = "none";
+  document.getElementById("tabPdf").style.display = "none";
+  document.getElementById("tabRow").style.display = "flex";
+  switchTab("docx");
 }
 
 // ─── Render PDF thumbnail ──────────────────────────────────────────────────────
@@ -133,26 +159,106 @@ async function renderPreview(pageNum) {
   preview.appendChild(wrapper);
 }
 
-// ─── Extract PDF text ──────────────────────────────────────────────────────────
-async function extractPdfText(from, to) {
-  let text = "";
+// ─── Clean OCR noise ───────────────────────────────────────────────────────────
+function cleanOcrText(raw) {
+  return raw
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => {
+      if (line.length === 0) return false;
+      if (line.length < 4) return false;
+
+      const thaiChars   = (line.match(/[\u0E00-\u0E7F]/g) || []).length;
+      const engChars    = (line.match(/[a-zA-Z]/g) || []).length;
+      const digitChars  = (line.match(/[0-9]/g) || []).length;
+      const spaceChars  = (line.match(/\s/g) || []).length;
+      const totalLen    = line.length;
+      const meaningful  = thaiChars + engChars + digitChars;
+
+      // ต้องมีตัวอักษร/ตัวเลขที่อ่านได้ >= 60% ของความยาวบรรทัด
+      if (meaningful / totalLen < 0.6) return false;
+
+      // บรรทัดสั้น (< 8 ตัว) ที่ไม่ใช่ภาษาไทยเลย → ขยะ
+      if (totalLen < 8 && thaiChars === 0) return false;
+
+      // ถ้ามีภาษาอังกฤษมากกว่าไทยในบรรทัดสั้นๆ และดูเหมือน noise
+      const letterCount = thaiChars + engChars;
+      if (letterCount > 0) {
+        const engRatio = engChars / letterCount;
+        // บรรทัดสั้น + อังกฤษเยอะ + ไทยน้อย = likely noise
+        if (totalLen < 25 && engRatio > 0.55 && thaiChars < 3) return false;
+      }
+
+      // Pattern เฉพาะของ OCR noise: ตัวอักษรเดี่ยวๆ คั่นด้วย space เยอะ
+      // เช่น "= a v ซ่ o dda" หรือ "ะ อิดะ ฮะ"
+      const tokens = line.split(/\s+/).filter(Boolean);
+      if (tokens.length >= 3) {
+        const shortTokens = tokens.filter(t => t.length <= 2).length;
+        // > 70% ของ tokens เป็นตัวสั้น (1-2 ตัวอักษร) → noise
+        if (shortTokens / tokens.length > 0.7) return false;
+      }
+
+      return true;
+    })
+    .map(line => line.replace(/\s{2,}/g, " "))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// ─── Extract PDF text (with OCR fallback for scanned pages) ───────────────────
+async function extractPdfText(from, to, onProgress) {
+  let fullText = "";
+
   for (let i = from; i <= to; i++) {
     const page = await pdfDoc.getPage(i);
+
+    // 1) ลองดึง text layer ก่อน
     const content = await page.getTextContent();
-    text += content.items.map((item) => item.str).join(" ") + "\n\n";
+    const layerText = content.items.map(item => item.str).join(" ").trim();
+
+    if (layerText.length > 10) {
+      fullText += layerText + "\n\n";
+    } else {
+      // ไม่มี text layer → render เป็น canvas แล้ว OCR
+      if (onProgress) onProgress(i, to, "ocr");
+
+      const scale = 3; // ความละเอียดสูง = OCR แม่นขึ้น
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+
+      // พื้นหลังขาว ก่อน render เพื่อให้ OCR แม่นขึ้น
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      const { data: { text } } = await Tesseract.recognize(canvas, "tha+eng", {
+        logger: () => {},
+        tessedit_pageseg_mode: "1",       // automatic page segmentation
+        preserve_interword_spaces: "1",
+      });
+
+      const cleaned = cleanOcrText(text);
+      if (cleaned) fullText += cleaned + "\n\n";
+    }
   }
-  return text.trim();
+
+  return fullText.trim();
 }
 
 // ─── Tab switching ─────────────────────────────────────────────────────────────
 function switchTab(tab) {
   currentMode = tab;
-  ["text", "pdf", "txt"].forEach((t) => {
+  ["text", "pdf", "txt", "docx"].forEach((t) => {
     document.getElementById(`tab${t.charAt(0).toUpperCase() + t.slice(1)}`)?.classList.toggle("active", t === tab);
   });
   document.getElementById("textPanel").style.display = tab === "text" ? "block" : "none";
   document.getElementById("pdfPageSelector").style.display = tab === "pdf" ? "block" : "none";
   document.getElementById("txtPanel").style.display = tab === "txt" ? "block" : "none";
+  document.getElementById("docxPanel").style.display = tab === "docx" ? "block" : "none";
 }
 
 function selectAllPages() {
@@ -162,13 +268,15 @@ function selectAllPages() {
 
 // ─── Clear file ────────────────────────────────────────────────────────────────
 function clearFile() {
-  pdfDoc = null; totalPages = 0; txtContent = "";
+  pdfDoc = null; totalPages = 0; txtContent = ""; docxContent = "";
   document.getElementById("pdfInfo").style.display = "none";
   document.getElementById("pdfPageSelector").style.display = "none";
   document.getElementById("txtPanel").style.display = "none";
+  document.getElementById("docxPanel").style.display = "none";
   document.getElementById("tabRow").style.display = "none";
   document.getElementById("pdfPreview").innerHTML = "";
   document.getElementById("txtPreview").textContent = "";
+  document.getElementById("docxPreview").textContent = "";
   document.getElementById("fileInput").value = "";
   switchTab("text");
 }
@@ -190,12 +298,20 @@ async function translateText() {
     btn.disabled = true;
     btn.querySelector(".btn-text").textContent = "กำลังอ่าน PDF...";
     btn.querySelector(".btn-icon").textContent = "⏳";
-    text = await extractPdfText(from, to);
-    if (!text) { showError("ไม่พบข้อความใน PDF นี้ (อาจเป็นไฟล์สแกน)"); resetBtn(btn); return; }
+    text = await extractPdfText(from, to, (cur, total, mode) => {
+      if (mode === "ocr") {
+        btn.querySelector(".btn-text").textContent = `OCR หน้า ${cur}/${total}...`;
+      }
+    });
+    if (!text) { showError("ไม่สามารถอ่านข้อความจาก PDF ได้"); resetBtn(btn); return; }
 
   } else if (currentMode === "txt") {
     text = txtContent;
     if (!text) { showError("ไม่พบข้อความในไฟล์ TXT"); return; }
+
+  } else if (currentMode === "docx") {
+    text = docxContent;
+    if (!text) { showError("ไม่พบข้อความในไฟล์ Word"); return; }
 
   } else {
     text = document.getElementById("inputText").value.trim();
@@ -302,19 +418,102 @@ document.addEventListener("change", (e) => {
     renderPreview(parseInt(document.getElementById("pageFrom").value) || 1);
   }
 });
-// ─── Download Translation as PDF ──────────────────────────────────────────────
-async function downloadTranslationPdf() {
+// ─── Download dispatcher ───────────────────────────────────────────────────────
+function downloadTranslation() {
+  const fmt = document.getElementById("downloadFormat").value;
+  if (fmt === "docx") downloadTranslationWord();
+  else downloadTranslationPdf();
+}
+
+// ─── Format picker ─────────────────────────────────────────────────────────────
+
+function selectFormat(fmt) {
+  document.getElementById("downloadFormat").value = fmt;
+
+  const badge = document.getElementById("downloadBadge");
+  const subLabel = document.getElementById("dlSubLabel");
+
+  if (fmt === "docx") {
+    if (badge) badge.textContent = "Word";
+    if (subLabel) subLabel.textContent = "บันทึกผลการแปลเป็น Word (.docx)";
+    // pills
+    const pillPdf  = document.getElementById("pillPdf");
+    const pillDocx = document.getElementById("pillDocx");
+    if (pillDocx) { pillDocx.style.background = "var(--accent)"; pillDocx.style.color = "#fff"; pillDocx.style.boxShadow = "0 2px 8px rgba(99,102,241,0.4)"; }
+    if (pillPdf)  { pillPdf.style.background  = "transparent";   pillPdf.style.color  = "var(--text-placeholder)"; pillPdf.style.boxShadow = "none"; }
+  } else {
+    if (badge) badge.textContent = "PDF";
+    if (subLabel) subLabel.textContent = "บันทึกผลการแปลเป็น PDF";
+    const pillPdf  = document.getElementById("pillPdf");
+    const pillDocx = document.getElementById("pillDocx");
+    if (pillPdf)  { pillPdf.style.background  = "var(--accent)"; pillPdf.style.color  = "#fff"; pillPdf.style.boxShadow = "0 2px 8px rgba(99,102,241,0.4)"; }
+    if (pillDocx) { pillDocx.style.background = "transparent";   pillDocx.style.color = "var(--text-placeholder)"; pillDocx.style.boxShadow = "none"; }
+  }
+}
+
+function updateDownloadBadge() {} // kept for compatibility
+
+// ─── Download Translation as Word (.docx) ─────────────────────────────────────
+async function downloadTranslationWord() {
   const outputEl = document.getElementById("outputText");
   const text = outputEl?.textContent?.trim();
-
-  // ตรวจว่ามีผลการแปลแล้ว
   if (!text || text === "ผลลัพธ์จะแสดงที่นี่..." || outputEl.classList.contains("error")) {
     alert("⚠️ ยังไม่มีผลการแปล กรุณาแปลภาษาก่อน");
     return;
   }
 
   const btn = document.getElementById("downloadPdfBtn");
-  btn.textContent = "⏳";
+  btn.querySelector(".btn-text").textContent = "⏳ กำลังสร้าง...";
+  btn.disabled = true;
+
+  try {
+    const { Document, Packer, Paragraph, TextRun, AlignmentType } = docx;
+
+    const paragraphs = text.split(/\n+/).filter(p => p.trim().length > 0);
+
+    const doc = new Document({
+      styles: {
+        default: {
+          document: { run: { font: "Cordia New", size: 26 } }
+        }
+      },
+      sections: [{
+        properties: {
+          page: { margin: { top: 1440, bottom: 1440, left: 1800, right: 1800 } }
+        },
+        children: paragraphs.map(p => new Paragraph({
+          children: [new TextRun({ text: p, size: 26, font: "Cordia New" })],
+          spacing: { after: 200, line: 360 }
+        }))
+      }]
+    });
+
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `translation_${new Date().toISOString().slice(0, 10)}.docx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert("เกิดข้อผิดพลาด: " + err.message);
+  } finally {
+    btn.querySelector(".btn-text").textContent = "ดาวน์โหลดไฟล์";
+    btn.disabled = false;
+  }
+}
+
+// ─── Download Translation as PDF ──────────────────────────────────────────────
+async function downloadTranslationPdf() {
+  const outputEl = document.getElementById("outputText");
+  const text = outputEl?.textContent?.trim();
+  if (!text || text === "ผลลัพธ์จะแสดงที่นี่..." || outputEl.classList.contains("error")) {
+    alert("⚠️ ยังไม่มีผลการแปล กรุณาแปลภาษาก่อน");
+    return;
+  }
+
+  const btn = document.getElementById("downloadPdfBtn");
+  btn.querySelector(".btn-text").textContent = "⏳ กำลังสร้าง...";
   btn.disabled = true;
 
   try {
@@ -327,134 +526,69 @@ async function downloadTranslationPdf() {
     const maxLineW = pageW - margin * 2;
     let y = margin;
 
-    // ── Header ──
-    doc.setFillColor(99, 102, 241);
-    doc.rect(0, 0, pageW, 22, "F");
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(13);
-    doc.setFont("helvetica", "bold");
-    doc.text("Translation Result", margin, 14);
-
-    // วันที่/เวลา
-    const now = new Date().toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" });
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-    doc.text(now, pageW - margin, 14, { align: "right" });
-
-    y = 32;
-
-    // ── ข้อมูลภาษา ──
-    const srcLang = document.getElementById("sourceLang")?.options[document.getElementById("sourceLang")?.selectedIndex]?.text || "-";
-    const tgtLang = document.getElementById("targetLang")?.options[document.getElementById("targetLang")?.selectedIndex]?.text || "-";
-    doc.setTextColor(80, 80, 120);
-    doc.setFontSize(9);
-    doc.setFont("helvetica", "italic");
-    doc.text(`${srcLang}  →  ${tgtLang}`, margin, y);
-    y += 8;
-
-    // เส้นคั่น
-    doc.setDrawColor(200, 200, 230);
-    doc.line(margin, y, pageW - margin, y);
-    y += 7;
-
-    // ── เนื้อหาผลการแปล ──
-    doc.setTextColor(30, 30, 50);
-    doc.setFontSize(11);
-    doc.setFont("helvetica", "normal");
-
-    // jsPDF ไม่มี Thai font → render ข้อความผ่าน canvas แล้วฝังเป็น image
-    // วิธีนี้รองรับทุกภาษารวมถึงไทย จีน ญี่ปุ่น อาหรับ
+    // render ข้อความผ่าน canvas (รองรับ Thai/JP/ZH/AR)
     const canvas = document.createElement("canvas");
-    const dpi = 2; // retina
-    const pxW = Math.round(maxLineW * 3.7795 * dpi); // mm → px
+    const dpi = 2;
+    const pxW = Math.round(maxLineW * 3.7795 * dpi);
     canvas.width = pxW;
 
-    // วัดความสูงที่ต้องการก่อน
     const ctx = canvas.getContext("2d");
     const fontSize = 14 * dpi;
     ctx.font = `${fontSize}px Sarabun, Arial, sans-serif`;
-    const lineH = fontSize * 1.55;
-    const words = text.split(" ");
-    let linesBuf = [], curLine = "";
-    for (const word of words) {
-      const test = curLine ? curLine + " " + word : word;
-      if (ctx.measureText(test).width > pxW - 10) {
-        if (curLine) linesBuf.push(curLine);
-        curLine = word;
-      } else {
-        curLine = test;
-      }
-    }
-    if (curLine) linesBuf.push(curLine);
-    // handle newlines in original text
+    const lineH = fontSize * 1.6;
+
+    // word-wrap
+    const rawLines = text.split("\n");
     const finalLines = [];
-    for (const l of linesBuf) {
-      for (const sub of l.split("\n")) finalLines.push(sub);
+    for (const raw of rawLines) {
+      if (raw.trim() === "") { finalLines.push(""); continue; }
+      const words = raw.split(" ");
+      let cur = "";
+      for (const w of words) {
+        const test = cur ? cur + " " + w : w;
+        if (ctx.measureText(test).width > pxW - 10) {
+          if (cur) finalLines.push(cur);
+          cur = w;
+        } else { cur = test; }
+      }
+      if (cur) finalLines.push(cur);
     }
 
-    const totalH = finalLines.length * lineH + 20 * dpi;
-    canvas.height = Math.ceil(totalH);
-
-    // วาดจริง
+    canvas.height = Math.ceil(finalLines.length * lineH + 20 * dpi);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#1e1e32";
+    ctx.fillStyle = "#111111";
     ctx.font = `${fontSize}px Sarabun, Arial, sans-serif`;
     ctx.textBaseline = "top";
-    finalLines.forEach((line, i) => {
-      ctx.fillText(line, 5, i * lineH + 8);
-    });
+    finalLines.forEach((line, i) => ctx.fillText(line, 5, i * lineH + 8));
 
     const imgData = canvas.toDataURL("image/png");
-    // แปลง px → mm สำหรับ jsPDF
     const imgWmm = maxLineW;
     const imgHmm = (canvas.height / dpi) / 3.7795;
+    const availH = pageH - margin * 2;
 
-    // ถ้าสูงเกินหน้า ให้แบ่งหน้า
-    const availH = pageH - y - margin;
     if (imgHmm <= availH) {
       doc.addImage(imgData, "PNG", margin, y, imgWmm, imgHmm);
-      y += imgHmm;
     } else {
-      // slice canvas ตามหน้า
       const pxPerPage = Math.floor(availH * 3.7795 * dpi);
       let srcY = 0;
-      let firstPage = true;
       while (srcY < canvas.height) {
-        const sliceH = firstPage ? pxPerPage : Math.floor((pageH - margin * 2) * 3.7795 * dpi);
         const sliceCanvas = document.createElement("canvas");
         sliceCanvas.width = canvas.width;
-        sliceCanvas.height = Math.min(sliceH, canvas.height - srcY);
-        const sc = sliceCanvas.getContext("2d");
-        sc.drawImage(canvas, 0, -srcY);
-        const sliceImg = sliceCanvas.toDataURL("image/png");
+        sliceCanvas.height = Math.min(pxPerPage, canvas.height - srcY);
+        sliceCanvas.getContext("2d").drawImage(canvas, 0, -srcY);
         const sliceHmm = sliceCanvas.height / dpi / 3.7795;
-        doc.addImage(sliceImg, "PNG", margin, y, imgWmm, sliceHmm);
-        srcY += sliceH;
-        if (srcY < canvas.height) {
-          doc.addPage();
-          y = margin + 6;
-        }
-        firstPage = false;
+        doc.addImage(sliceCanvas.toDataURL("image/png"), "PNG", margin, y, imgWmm, sliceHmm);
+        srcY += pxPerPage;
+        if (srcY < canvas.height) { doc.addPage(); y = margin; }
       }
     }
 
-    // ── Footer ──
-    const totalPages = doc.internal.getNumberOfPages();
-    for (let i = 1; i <= totalPages; i++) {
-      doc.setPage(i);
-      doc.setFontSize(8);
-      doc.setTextColor(160, 160, 180);
-      doc.text(`หน้า ${i} / ${totalPages}`, pageW / 2, pageH - 8, { align: "center" });
-    }
-
-    // ── Save ──
-    const filename = `translation_${new Date().toISOString().slice(0,10)}.pdf`;
-    doc.save(filename);
+    doc.save(`translation_${new Date().toISOString().slice(0,10)}.pdf`);
   } catch (err) {
     alert("เกิดข้อผิดพลาด: " + err.message);
   } finally {
-    btn.textContent = "⬇️ดาวโหลดไฟล์ PDF ";
+    btn.querySelector(".btn-text").textContent = "ดาวน์โหลดไฟล์";
     btn.disabled = false;
   }
 }
@@ -507,11 +641,24 @@ async function summarizeTranscript() {
   try {
     const wordCount = text.split(/\s+/).length;
     const maxSent   = wordCount < 100 ? 3 : wordCount < 300 ? 4 : wordCount < 600 ? 5 : 7;
+    const summary   = extractiveSummarize(text, maxSent);
+
+    if (!summary) {
+      summaryEl.style.color = "var(--text-placeholder)";
+      summaryEl.innerHTML = "ไม่สามารถสรุปข้อความได้";
+      return;
+    }
+
+    const sentences = summary.split("\n").map(s => s.trim()).filter(Boolean);
     summaryEl.style.color = "var(--text)";
-    summaryEl.textContent = extractiveSummarize(text, maxSent) || "ไม่สามารถสรุปข้อความได้";
+    summaryEl.innerHTML = sentences.map(s => `
+      <div class="summary-item">
+        <span class="summary-text">${s}</span>
+      </div>
+    `).join("");
   } catch (err) {
     summaryEl.style.color = "var(--error)";
-    summaryEl.textContent = "⚠️ สรุปไม่สำเร็จ: " + err.message;
+    summaryEl.innerHTML = "⚠️ สรุปไม่สำเร็จ: " + err.message;
   } finally {
     summaryBox.classList.remove("loading");
     btn.disabled = false;
@@ -519,7 +666,12 @@ async function summarizeTranscript() {
 }
 
 function copySummaryResult() {
-  const text = document.getElementById("summaryOutputText").textContent;
+  const el = document.getElementById("summaryOutputText");
+  if (!el) return;
+  const items = el.querySelectorAll(".summary-text");
+  const text = items.length
+    ? Array.from(items).map(el => el.textContent.trim()).join("\n")
+    : el.textContent.trim();
   if (!text || text.startsWith("⚠️") || text.startsWith("✨") || text === "ผลสรุปจะแสดงที่นี่...") return;
   navigator.clipboard.writeText(text).then(() => {
     const btns = document.querySelectorAll("#summaryResultBox .copy-btn");
