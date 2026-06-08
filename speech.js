@@ -45,7 +45,7 @@ if ('webkitSpeechRecognition' in window || 'speechRecognition' in window) {
     const outputEl = document.getElementById("liveOutputText");
     if (!finalTranscript && !interimTranscript) return;
 
-    // interim: แสดงจุดบอกว่ากำลังฟัง ไม่แสดงข้อความดิบ
+    // interim: แสดงจุดบอกว่ากำลังฟัง 
     if (interimTranscript && !finalTranscript) {
       outputEl.style.color = "var(--text-placeholder)";
       outputEl.textContent = "🎤 กำลังฟัง...";
@@ -226,59 +226,6 @@ function clearAudioFile() {
 // ─── API: ใช้ Claude (Anthropic) ถอดความเสียงแทน ASR Server ──────────────────
 const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 
-// ─── แปลงไฟล์เสียง/วิดีโอเป็น WAV (16kHz, mono, PCM) ก่อนส่ง server ──────────
-async function convertToWav(file) {
-  // ถ้าเป็น WAV อยู่แล้ว ส่งตรงเลยไม่ต้อง convert
-  if (file.name.toLowerCase().endsWith(".wav") || file.type === "audio/wav") {
-    return new File([file], "audio.wav", { type: "audio/wav" });
-  }
-  const arrayBuffer = await file.arrayBuffer();
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  audioCtx.close();
-
-  const targetSampleRate = 16000;
-  const offlineCtx = new OfflineAudioContext(
-    1, // mono
-    Math.ceil(audioBuffer.duration * targetSampleRate),
-    targetSampleRate
-  );
-  const source = offlineCtx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(offlineCtx.destination);
-  source.start(0);
-  const rendered = await offlineCtx.startRendering();
-  const pcmData = rendered.getChannelData(0);
-
-  // เขียน WAV header + PCM 16-bit samples
-  const numSamples = pcmData.length;
-  const wavBuffer = new ArrayBuffer(44 + numSamples * 2);
-  const view = new DataView(wavBuffer);
-  const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
-
-  writeStr(0, "RIFF");
-  view.setUint32(4, 36 + numSamples * 2, true);
-  writeStr(8, "WAVE");
-  writeStr(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);           // PCM
-  view.setUint16(22, 1, true);           // mono
-  view.setUint32(24, targetSampleRate, true);
-  view.setUint32(28, targetSampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, "data");
-  view.setUint32(40, numSamples * 2, true);
-
-  let offset = 44;
-  for (let i = 0; i < numSamples; i++) {
-    const s = Math.max(-1, Math.min(1, pcmData[i]));
-    view.setInt16(offset, s < 0 ? s * 32768 : s * 32767, true);
-    offset += 2;
-  }
-
-  return new File([wavBuffer], "audio.wav", { type: "audio/wav" });
-}
 
 // ─── แปลงไฟล์เป็น base64 ──────────────────────────────────────────────────────
 async function fileToBase64(file) {
@@ -317,31 +264,49 @@ async function checkAsrServer() {
   }
 }
 
-// ─── ถอดความผ่าน ASR Server (Whisper) ────────────────────────────────────────
-async function transcribeViaAsrServer(wavFile, selectedLangCode, targetLang) {
-  const formData = new FormData();
-  formData.append("file", wavFile);
-  formData.append("source_lang", selectedLangCode === "auto" ? "auto" : (whisperToGoogleLang[selectedLangCode] || "auto"));
-  formData.append("mode", "original");
-  formData.append("target_lang", targetLang);
+// ─── ถอดความผ่าน ASR Server (Whisper) พร้อมแสดง % อัปโหลด ──────────────────
+async function transcribeViaAsrServer(wavFile, selectedLangCode, targetLang, onProgress) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("file", wavFile);
+    formData.append("source_lang", selectedLangCode === "auto" ? "auto" : (whisperToGoogleLang[selectedLangCode] || "auto"));
+    formData.append("mode", "original");
+    formData.append("target_lang", targetLang);
 
-  const response = await fetch(`${ASR_SERVER_URL}/transcribe`, { method: "POST", body: formData });
-  const rawText = await response.text();
-  if (!response.ok) {
-    let detail = rawText;
-    try {
-      const j = JSON.parse(rawText);
-      detail = j.error || j.detail || j.message || j.msg || JSON.stringify(j);
-      if (typeof detail === "object") detail = JSON.stringify(detail);
-    } catch {}
-    throw new Error(`ASR Server HTTP ${response.status}: ${detail}`);
-  }
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${ASR_SERVER_URL}/transcribe`);
 
-  let data;
-  try { data = JSON.parse(rawText); } catch { throw new Error("ASR Server ตอบไม่ใช่ JSON: " + rawText.slice(0, 200)); }
+    // ─── progress อัปโหลด ─────────────────────────────────────────────────
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        onProgress(`⬆️ กำลังส่งไฟล์ไปยัง ASR Server... ${pct}%`);
+      }
+    };
 
-  const transcribedText = (data.text || data.transcript || data.result || "").trim();
-  return transcribedText;
+    xhr.upload.onload = () => {
+      if (onProgress) onProgress("⏳ ASR Server กำลังถอดความ กรุณารอสักครู่...");
+    };
+
+    xhr.onload = () => {
+      const rawText = xhr.responseText;
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let detail = rawText;
+        try {
+          const j = JSON.parse(rawText);
+          detail = j.error || j.detail || j.message || j.msg || JSON.stringify(j);
+          if (typeof detail === "object") detail = JSON.stringify(detail);
+        } catch {}
+        return reject(new Error(`ASR Server HTTP ${xhr.status}: ${detail}`));
+      }
+      let data;
+      try { data = JSON.parse(rawText); } catch { return reject(new Error("ASR Server ตอบไม่ใช่ JSON: " + rawText.slice(0, 200))); }
+      resolve((data.text || data.transcript || data.result || "").trim());
+    };
+
+    xhr.onerror = () => reject(new Error("เชื่อมต่อ ASR Server ล้มเหลว"));
+    xhr.send(formData);
+  });
 }
 
 // ─── ถอดความผ่าน Whisper ใน Browser (xenova/transformers) ─────────────────────
@@ -373,7 +338,7 @@ async function transcribeViaWhisper(file, selectedLangCode, onProgress) {
     }
   }
 
-  onProgress("⏳ กำลังถอดความด้วย Whisper...");
+  onProgress("⏳ กำลังเตรียมไฟล์เสียง...");
 
   // แปลงไฟล์เป็น AudioBuffer → Float32Array (16kHz mono)
   const arrayBuffer = await file.arrayBuffer();
@@ -383,9 +348,12 @@ async function transcribeViaWhisper(file, selectedLangCode, onProgress) {
     decoded = await audioCtx.decodeAudioData(arrayBuffer);
   } catch {
     audioCtx.close();
-    throw new Error("ไม่สามารถอ่านไฟล์เสียงนี้ได้ — ลองใช้ .mp3 หรือ .wav");
+    throw new Error("ไม่สามารถอ่านไฟล์เสียงนี้ได้ — ลองใช้ไฟล์ .mp3, .mp4, .m4a, .wav หรือ .webm");
   }
   audioCtx.close();
+
+  const durationMin = (decoded.duration / 60).toFixed(1);
+  onProgress(`⏳ กำลังถอดความด้วย Whisper... (ความยาว ${durationMin} นาที)`);
 
   // ดึง mono channel แรก
   const channelData = decoded.getChannelData(0);
@@ -404,14 +372,68 @@ async function transcribeViaWhisper(file, selectedLangCode, onProgress) {
 
   const langOpt = selectedLangCode === "auto" ? {} : { language: whisperLangs[selectedLangCode] || null };
 
-  const result = await whisperPipeline(pcm, {
-    ...langOpt,
-    chunk_length_s: 30,
-    stride_length_s: 5,
-    return_timestamps: false,
-  });
+  // ─── แบ่ง chunk สำหรับคลิปยาว พร้อมแสดง % ───────────────────────────────
+  const CHUNK_SEC = 60;        // รองรับยาวขึ้น (เดิม 30 วิ)
+  const STRIDE_SEC = 3;        // overlap น้อยลง → เร็วขึ้น (เดิม 5 วิ)
+  const SR = 16000;
+  const chunkSize = CHUNK_SEC * SR;
+  const strideSize = STRIDE_SEC * SR;
+  const totalChunks = Math.ceil(pcm.length / (chunkSize - strideSize));
 
-  return (result.text || "").trim();
+  // ถ้าไฟล์สั้น — ส่งทีเดียวเลย
+  if (pcm.length <= chunkSize) {
+    onProgress("⏳ กำลังถอดความด้วย Whisper (0%)...");
+    const result = await whisperPipeline(pcm, {
+      ...langOpt,
+      chunk_length_s: CHUNK_SEC,
+      stride_length_s: STRIDE_SEC,
+      return_timestamps: false,
+    });
+    onProgress("⏳ กำลังถอดความด้วย Whisper (100%)...");
+    return (result.text || "").trim();
+  }
+
+  // ไฟล์ยาว — แบ่งเป็น chunk แล้วต่อกัน
+  let fullText = "";
+  let offset = 0;
+  let chunkIdx = 0;
+  while (offset < pcm.length) {
+    const slice = pcm.slice(offset, offset + chunkSize);
+    const pct = Math.round((chunkIdx / totalChunks) * 100);
+    const elapsedSec = Math.round(offset / SR);
+    const mm = String(Math.floor(elapsedSec / 60)).padStart(2, "0");
+    const ss = String(elapsedSec % 60).padStart(2, "0");
+    onProgress(`⏳ กำลังถอดความ... ${pct}% (${mm}:${ss} / ${durationMin} นาที)`);
+
+    const result = await whisperPipeline(slice, {
+      ...langOpt,
+      chunk_length_s: CHUNK_SEC,
+      stride_length_s: STRIDE_SEC,
+      return_timestamps: false,
+    });
+    fullText += (result.text || "") + " ";
+    offset += chunkSize - strideSize;
+    chunkIdx++;
+  }
+  onProgress("⏳ กำลังถอดความ... 100%");
+  return fullText.trim();
+}
+
+// ─── Progress Bar helper ──────────────────────────────────────────────────────
+function setProgress(pct, label) {
+  const wrap = document.getElementById("uploadProgressWrap");
+  const bar  = document.getElementById("uploadProgressBar");
+  const pctEl = document.getElementById("uploadProgressPct");
+  const lblEl = document.getElementById("uploadProgressLabel");
+  if (!wrap) return;
+  if (pct === null) {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "block";
+  bar.style.width = pct + "%";
+  pctEl.textContent = pct + "%";
+  if (label) lblEl.textContent = label;
 }
 
 // ─── ฟังก์ชันหลัก: ลอง ASR Server ก่อน → fallback Claude ────────────────────
@@ -435,6 +457,7 @@ async function processAudioFile() {
   resultBox.classList.add("loading");
   outputEl.style.color = "var(--text-placeholder)";
   outputEl.textContent = "⏳ กำลังตรวจสอบ ASR Server...";
+  setProgress(0, "กำลังตรวจสอบ Server...");
 
   try {
     const selectedLangCode = document.getElementById("speechLang")?.value || "auto";
@@ -450,21 +473,26 @@ async function processAudioFile() {
     const asrOnline = await checkAsrServer();
 
     if (asrOnline) {
-      // ─── เส้นทาง ASR Server ───────────────────────────────────────────────
-      outputEl.textContent = "✅ เชื่อมต่อ ASR Server สำเร็จ กำลังแปลงไฟล์เป็น WAV...";
-      btn.querySelector(".btn-text").textContent = "กำลังแปลงไฟล์เสียง...";
+      // ─── เส้นทาง ASR Server — ส่งไฟล์ต้นฉบับตรงๆ ─────────────────────────
+      const fileMB = (uploadedAudioFile.size / 1024 / 1024).toFixed(1);
+      outputEl.textContent = `⏳ กำลังเตรียมส่งไฟล์ (${fileMB} MB)...`;
+      btn.querySelector(".btn-text").textContent = "กำลังอัปโหลด...";
+      setProgress(5, "กำลังเตรียมไฟล์...");
 
-      let wavFile;
-      try {
-        wavFile = await convertToWav(uploadedAudioFile);
-      } catch (convertErr) {
-        throw new Error("แปลงไฟล์เสียงไม่สำเร็จ: " + toErrStr(convertErr));
-      }
-
-      outputEl.textContent = `⏳ กำลังส่งถอดความผ่าน ASR Server... (${(wavFile.size / 1024 / 1024).toFixed(1)} MB)`;
-      btn.querySelector(".btn-text").textContent = "กำลังถอดความ (ASR)...";
-
-      const transcribedText = await transcribeViaAsrServer(wavFile, selectedLangCode, targetLang);
+      const transcribedText = await transcribeViaAsrServer(
+        uploadedAudioFile, selectedLangCode, targetLang,
+        (msg) => {
+          outputEl.textContent = msg;
+          // parse % จาก msg เช่น "45%"
+          const m = msg.match(/(\d+)%/);
+          if (m) {
+            const raw = parseInt(m[1]);
+            // อัปโหลด = 10–60%, ถอดความ server = 60–90%
+            const mapped = msg.includes("ส่งไฟล์") ? 10 + Math.round(raw * 0.5) : 60 + Math.round(raw * 0.3);
+            setProgress(Math.min(mapped, 90), msg.replace(/⬆️|⏳/g, "").trim());
+          }
+        }
+      );
 
       if (!transcribedText) {
         outputEl.style.color = "var(--text-placeholder)";
@@ -472,21 +500,22 @@ async function processAudioFile() {
         return;
       }
 
-      outputEl.style.color = "var(--text)";
-      outputEl.textContent = `${flag} กำลังแปลภาษา...`;
-
-      // แปลภาษาผ่าน Google Translate
+      outputEl.style.color = "var(--text-placeholder)";
+      outputEl.textContent = `กำลังแปลภาษา...`;
+      setProgress(92, "กำลังแปลภาษา...");
       try {
         const srcGoogleLang = whisperToGoogleLang[selectedLangCode] || "auto";
         const normalize = (s) => s.replace(/\s+/g, " ").trim().toLowerCase();
+        const timeout30s = (p) => Promise.race([p, new Promise(r => setTimeout(() => r(null), 30000))]);
         let finalText;
         if (srcGoogleLang !== "auto" && srcGoogleLang === targetLang) {
-          finalText = await translateTo(await translateTo(transcribedText, srcGoogleLang, "en"), "en", targetLang);
+          const pivot = await timeout30s(translateTo(transcribedText, srcGoogleLang, "en"));
+          finalText = pivot ? await timeout30s(translateTo(pivot, "en", targetLang)) : transcribedText;
         } else {
-          let translated = await translateTo(transcribedText, "auto", targetLang);
+          let translated = await timeout30s(translateTo(transcribedText, "auto", targetLang));
           if (!translated || normalize(translated) === normalize(transcribedText))
-            translated = await translateTo(transcribedText, srcGoogleLang !== "auto" ? srcGoogleLang : "en", targetLang);
-          finalText = translated;
+            translated = await timeout30s(translateTo(transcribedText, srcGoogleLang !== "auto" ? srcGoogleLang : "en", targetLang));
+          finalText = translated || transcribedText;
         }
         const deduped = deduplicateText(finalText);
         outputEl.textContent = (deduped && normalize(deduped) !== normalize(transcribedText)) ? deduped : transcribedText;
@@ -498,11 +527,24 @@ async function processAudioFile() {
       // ─── Fallback: Whisper ใน Browser ────────────────────────────────────
       outputEl.textContent = "⚠️ ASR Server ไม่ตอบสนอง กำลังใช้ Whisper ใน Browser แทน...";
       btn.querySelector(".btn-text").textContent = "กำลังโหลด Whisper...";
+      setProgress(5, "กำลังโหลด Whisper...");
 
       const transcribedText = await transcribeViaWhisper(
         uploadedAudioFile,
         selectedLangCode,
-        (msg) => { outputEl.textContent = msg; }
+        (msg) => {
+          outputEl.textContent = msg;
+          const m = msg.match(/(\d+)%/);
+          if (m) {
+            const raw = parseInt(m[1]);
+            // Whisper = 10–90%
+            setProgress(10 + Math.round(raw * 0.8), msg.replace(/[⏳⬇️🤖]/g, "").trim());
+          } else if (msg.includes("โหลดโมเดล")) {
+            setProgress(8, "กำลังโหลดโมเดล Whisper...");
+          } else if (msg.includes("เตรียมไฟล์")) {
+            setProgress(15, "กำลังเตรียมไฟล์เสียง...");
+          }
+        }
       );
 
       if (!transcribedText) {
@@ -511,12 +553,16 @@ async function processAudioFile() {
         return;
       }
 
-      outputEl.style.color = "var(--text)";
-      outputEl.textContent = `${flag} กำลังแปลภาษา...`;
+      outputEl.style.color = "var(--text-placeholder)";
+      outputEl.textContent = `กำลังแปลภาษา...`;
+      setProgress(92, "กำลังแปลภาษา...");
 
       try {
         const deduped = deduplicateText(transcribedText);
-        const translated = await translateTo(deduped, "auto", targetLang);
+        // แปลพร้อม timeout รวม 30 วิ — ถ้าเกินให้ใช้ข้อความต้นฉบับ
+        const translatePromise = translateTo(deduped, "auto", targetLang);
+        const timeoutPromise = new Promise(r => setTimeout(() => r(null), 30000));
+        const translated = await Promise.race([translatePromise, timeoutPromise]);
         const normalize = (s) => s.replace(/\s+/g, " ").trim().toLowerCase();
         outputEl.textContent = (translated && normalize(translated) !== normalize(deduped)) ? translated : deduped;
       } catch {
@@ -532,6 +578,7 @@ async function processAudioFile() {
     btn.disabled = false;
     btn.querySelector(".btn-text").textContent = "เริ่มถอดความจากไฟล์คลิป";
     resultBox.classList.remove("loading");
+    setProgress(null);
   }
 }
 
@@ -607,46 +654,91 @@ function splitText(text, maxLen) {
 }
 
 
-// ─── ตัดประโยค/วลีซ้ำที่ Whisper hallucinate ออก ────────────────────────────
+// ─── ตัดคำ/วลีซ้ำที่ Whisper hallucinate ออก (รองรับไทย, คำเดี่ยว, วลียาว) ──────
 function deduplicateText(text) {
   if (!text) return text;
-  const words = text.split(/\s+/);
-  const deduped = [];
-  let i = 0;
-  while (i < words.length) {
-    let found = false;
-    for (let len = Math.min(15, Math.floor((words.length - i) / 2)); len >= 3; len--) {
-      const phrase = words.slice(i, i + len).join(" ");
-      const next = words.slice(i + len, i + len * 2).join(" ");
-      if (phrase === next) {
-        deduped.push(...words.slice(i, i + len));
-        let skip = i + len;
-        while (skip + len <= words.length && words.slice(skip, skip + len).join(" ") === phrase) { skip += len; }
-        i = skip;
-        found = true;
-        break;
+  let prev = null;
+  let words = text.split(/\s+/).filter(Boolean);
+  // วน pass ซ้ำจนกว่า output ไม่เปลี่ยนแปลงอีก
+  while (true) {
+    const deduped = [];
+    let i = 0;
+    while (i < words.length) {
+      let found = false;
+      // ตรวจ len ตั้งแต่ยาว → สั้น รวมถึง len=1 (คำเดี่ยว)
+      for (let len = Math.min(15, Math.floor((words.length - i) / 2)); len >= 1; len--) {
+        const phrase = words.slice(i, i + len).join(" ");
+        const next   = words.slice(i + len, i + len * 2).join(" ");
+        if (phrase === next) {
+          deduped.push(...words.slice(i, i + len));
+          let skip = i + len;
+          // กลืนทุก occurrence ที่ตามมาติดกัน
+          while (
+            skip + len <= words.length &&
+            words.slice(skip, skip + len).join(" ") === phrase
+          ) skip += len;
+          i = skip;
+          found = true;
+          break;
+        }
       }
+      if (!found) { deduped.push(words[i]); i++; }
     }
-    if (!found) { deduped.push(words[i]); i++; }
+    const result = deduped.join(" ");
+    if (result === prev) break; // ไม่มีอะไรเปลี่ยนแล้ว — หยุด
+    prev = result;
+    words = deduped;
   }
-  return deduped.join(" ").trim();
+  return (prev || "").trim();
 }
 
-// translateTo: รองรับทุกภาษาเป้าหมาย
-async function translateTo(text, sourceLang = "auto", targetLang = "th") {
-  const chunks = splitText(text, 1000);
-  let translated = "";
-  for (const chunk of chunks) {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(chunk)}`;
-    const res = await fetch(url);
+// ─── translateTo: รองรับทุกภาษา + timeout + retry + parallel chunks ──────────
+async function fetchTranslate(chunk, sourceLang, targetLang, timeoutMs = 8000) {
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sourceLang}&tl=${targetLang}&dt=t&q=${encodeURIComponent(chunk)}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    if (data && data[0]) {
-      translated += data[0].filter((s) => Array.isArray(s) && s[0]).map((s) => s[0]).join("") + "\n";
-    }
+    return data?.[0]?.filter(s => Array.isArray(s) && s[0]).map(s => s[0]).join("") || chunk;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
   }
-  return translated.trim();
 }
+
+async function translateTo(text, sourceLang = "auto", targetLang = "th") {
+  if (!text || !text.trim()) return text;
+
+  // ถ้าภาษาต้นทาง = เป้าหมาย คืนข้อความเดิมทันที (ไม่แปล)
+  const srcNorm = sourceLang === "auto" ? null : sourceLang.split("-")[0];
+  const tgtNorm = targetLang.split("-")[0];
+  if (srcNorm && srcNorm === tgtNorm) return text;
+
+  const chunks = splitText(text, 1000);
+
+  // ส่งแปลแบบ parallel (สูงสุด 3 ก้อนพร้อมกัน) + retry 1 ครั้งถ้า timeout
+  const CONCURRENCY = 3;
+  const results = new Array(chunks.length);
+
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = chunks.slice(i, i + CONCURRENCY);
+    const settled = await Promise.allSettled(
+      batch.map((chunk, j) =>
+        fetchTranslate(chunk, sourceLang, targetLang, 8000)
+          .catch(() => fetchTranslate(chunk, sourceLang, targetLang, 12000)) // retry
+      )
+    );
+    settled.forEach((r, j) => {
+      results[i + j] = r.status === "fulfilled" ? r.value : chunks[i + j]; // fallback = ต้นฉบับ
+    });
+  }
+
+  return results.join("\n").trim();
+}
+
 // alias เดิมสำหรับ backward compat
 async function translateToThai(text, sourceLang = "en") {
   return translateTo(text, sourceLang, "th");

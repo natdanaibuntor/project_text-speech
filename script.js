@@ -326,26 +326,46 @@ async function translateText() {
   document.getElementById("resultBox").classList.add("loading");
 
   try {
-    async function doTranslate(srcLang) {
-      const chunks = splitText(text, 1000);
-      let result = "";
-      for (const chunk of chunks) {
-        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${srcLang}&tl=${tl}&hl=${tl}&dt=t&dt=bd&dj=1&q=${encodeURIComponent(chunk)}`;
-        const res = await fetch(url);
+    // fetch พร้อม timeout + retry 1 ครั้ง
+    async function fetchChunk(chunk, srcLang, timeoutMs = 8000) {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${srcLang}&tl=${tl}&hl=${tl}&dt=t&dt=bd&dj=1&q=${encodeURIComponent(chunk)}`;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        if (data && data.sentences) {
-          result += data.sentences.filter(s => s.trans).map(s => s.trans).join("") + "\n";
-        } else if (data && data[0]) {
-          result += data[0].filter((s) => Array.isArray(s) && s[0]).map((s) => s[0]).join("") + "\n";
-        }
+        if (data && data.sentences) return data.sentences.filter(s => s.trans).map(s => s.trans).join("");
+        if (data && data[0]) return data[0].filter(s => Array.isArray(s) && s[0]).map(s => s[0]).join("");
+        return chunk;
+      } catch (e) {
+        clearTimeout(timer);
+        throw e;
       }
-      return result.trim();
     }
 
-    let translated = await doTranslate("auto");
+    async function doTranslate(srcLang) {
+      const chunks = splitText(text, 1000);
+      const CONCURRENCY = 3;
+      const results = new Array(chunks.length);
+      for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+        const batch = chunks.slice(i, i + CONCURRENCY);
+        const settled = await Promise.allSettled(
+          batch.map(chunk =>
+            fetchChunk(chunk, srcLang, 8000)
+              .catch(() => fetchChunk(chunk, srcLang, 12000)) // retry
+          )
+        );
+        settled.forEach((r, j) => { results[i + j] = r.status === "fulfilled" ? r.value : chunks[i + j]; });
+      }
+      return results.join("\n").trim();
+    }
+
+    const timeout30s = (p) => Promise.race([p, new Promise(r => setTimeout(() => r(null), 30000))]);
+    let translated = await timeout30s(doTranslate("auto"));
     if (!translated || translated === text.trim()) {
-      translated = await doTranslate(sl !== "auto" ? sl : "en");
+      translated = await timeout30s(doTranslate(sl !== "auto" ? sl : "en"));
     }
     outputEl.textContent = translated || "ไม่ได้รับผลการแปล";
   } catch (err) {
